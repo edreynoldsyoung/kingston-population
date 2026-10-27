@@ -1,0 +1,58 @@
+/* styles.css — page styling for Kingston_Population.Rmd */
+
+body {
+  background-color: #faf0e6;   /* linen, to match the chart backgrounds */
+  color: #222;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+h1 {
+  margin-top: 2em;
+  border-bottom: 1px solid #c8bfb4;
+  padding-bottom: 0.2em;
+}
+
+h1.title {
+  margin-top: 0.5em;
+  border-bottom: none;
+}
+
+/* Frame around every chart (added by the plot hook in the setup chunk) */
+.plot-frame {
+  background: #faf0e6;
+  border: 1px solid #d8cfc4;
+  border-radius: 6px;
+  padding: 8px;
+  margin: 1.2em 0;
+}
+
+.plot-frame img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+table {
+  background: #fffaf3;
+  font-size: 0.92em;
+}
+
+table caption {
+  color: #444;
+  font-weight: bold;
+  padding: 0.4em 0;
+}
+
+footer {
+  margin-top: 3em;
+  padding-top: 1em;
+  border-top: 1px solid #c8bfb4;
+  font-size: 0.85em;
+  color: #555;
+}
+
+#TOC {
+  background: #fffaf3;
+}

@@ -1,0 +1,541 @@
+---
+title: "Kingston, New York: Population Trends"
+author: "Ed Young"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    df_print: kable
+  html_document:
+    css: styles.css
+    toc: true
+    toc_float: true
+    df_print: kable
+params:
+  refresh_data: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 5.5,
+  dpi = 150
+)
+
+# In the PDF, scale every chart to the width of the text
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(out.width = "100%")
+}
+
+.old_plot_hook <- knitr::knit_hooks$get("plot")
+knitr::knit_hooks$set(plot = function(x, options) {
+  out <- .old_plot_hook(x, options)
+  if (knitr::is_html_output()) {
+    out <- paste0('<div class="plot-frame">\n', out, '\n</div>')
+  }
+  out
+})
+
+library(here)
+source(here("R", "load_packages.R"))
+source(here("R", "config.R"))
+source(here("R", "theme.R"))
+source(here("R", "get_data.R"))
+source(here("R", "process.R"))
+
+refresh <- isTRUE(params$refresh_data)
+```
+
+```{r load-data, include=FALSE}
+# Downloads happen only on the first knit or when refresh_data is true.
+pep_long   <- load_pep(refresh)
+components <- load_components(refresh)
+shapes     <- tryCatch(load_shapes(refresh), error = function(e) {
+  warning(conditionMessage(e), call. = FALSE); NULL })
+decennial  <- tryCatch(load_decennial(refresh), error = function(e) {
+  warning(conditionMessage(e), call. = FALSE); NULL })
+acs_raw    <- tryCatch(load_acs(refresh), error = function(e) {
+  warning(conditionMessage(e), call. = FALSE); NULL })
+
+places     <- make_place_lookup(pep_long)
+geo_labels <- make_geo_labels(pep_long, places)
+annual     <- build_annual(pep_long)
+benchmarks <- build_benchmarks(pep_long)
+growth     <- build_growth(pep_long, pep_vintage)
+comp       <- build_components(components)
+dec        <- build_decennial(decennial)
+acs        <- build_acs_indicators(acs_raw)
+
+focus          <- filter(places, focus)
+kingston_geoid <- focus %>% filter(name == "Kingston city") %>% pull(geoid)
+county_geoids  <- paste0(state_fips, study_counties)
+home_geoid     <- paste0(state_fips, study_counties[[home_county]])
+
+# Focus places ordered from largest to smallest, for facets and tables
+focus_order <- annual %>%
+  filter(geoid %in% focus$geoid, year == max(year)) %>%
+  arrange(desc(population)) %>%
+  left_join(select(places, geoid, label), by = "geoid") %>%
+  pull(label)
+
+first_or_na <- function(x) if (length(x) > 0) x[[1]] else NA
+kingston_latest <- annual %>% filter(geoid == kingston_geoid, year == pep_vintage) %>%
+  pull(population) %>% first_or_na()
+kingston_growth <- filter(growth, geoid == kingston_geoid)
+kingston_2020 <- first_or_na(kingston_growth$census_2020)
+kingston_2010 <- first_or_na(kingston_growth$pop_2010)
+```
+
+# About this report
+
+This report tracks the population of the City of Kingston and the towns around
+it, using four Census Bureau sources: annual population estimates for cities
+and towns, county estimates of births, deaths and migration, the decennial
+census, and the American Community Survey (ACS). The Kingston area here means
+`r knitr::combine_words(focus_order)`. Maps cover every city and town in
+`r knitr::combine_words(paste(names(study_counties), "County"))`.
+
+The 2020 Census counted `r fmt_count(kingston_2020)` residents in the City of
+Kingston, against `r fmt_count(kingston_2010)` in April 2010. The Census Bureau's
+most recent estimate, for July 1, `r pep_vintage`, is `r fmt_count(kingston_latest)`.
+
+# Where Kingston sits
+
+```{r no-shapes, eval = is.null(shapes), results = "asis"}
+cat("*Map boundaries could not be downloaded, so the maps are omitted.",
+    "Knit again with `refresh_data: true` when online.*")
+```
+
+```{r study-map, eval = !is.null(shapes), fig.height = 7.5}
+study_map <- shapes$cousub %>%
+  left_join(select(places, geoid, label, focus), by = c("GEOID" = "geoid")) %>%
+  mutate(group = if_else(coalesce(focus, FALSE), "Kingston area", "Other cities and towns"))
+
+ggplot() +
+  geom_sf(data = study_map, aes(fill = group), colour = "white", linewidth = 0.3) +
+  geom_sf(data = shapes$counties, fill = NA, colour = "grey25", linewidth = 0.6) +
+  geom_sf_text(data = filter(study_map, group == "Kingston area"),
+               aes(label = label), size = 3) +
+  scale_fill_manual(values = c("Kingston area" = okabe_ito[["orange"]],
+                               "Other cities and towns" = "grey85"),
+                    name = NULL) +
+  labs(title = "The Kingston area",
+       caption = paste0("Cities and towns of ",
+                        knitr::combine_words(names(study_counties)),
+                        " counties. Census cartographic boundaries, ", shapes_year, ".")) +
+  theme_kingston_map()
+```
+
+# Population since 2000
+
+Each line is the Census Bureau's July 1 estimate; the circles are the April 1
+benchmarks from the 2000, 2010 and 2020 censuses. The shaded area marks the years since
+the 2020 Census, which come from the current estimates series rather than from
+the reconciled intercensal series.
+
+```{r annual-focus, fig.height = 9}
+label_focus <- function(df) {
+  df %>%
+    inner_join(select(focus, geoid, label), by = "geoid") %>%
+    mutate(label = factor(label, levels = focus_order))
+}
+focus_annual <- annual %>% label_focus()
+focus_bench  <- benchmarks %>% label_focus()
+
+ggplot(focus_annual, aes(date, population)) +
+  annotate("rect", xmin = as.Date("2020-04-01"), xmax = max(focus_annual$date),
+           ymin = -Inf, ymax = Inf, fill = "grey60", alpha = 0.15) +
+  geom_line(colour = okabe_ito[["blue"]], linewidth = 0.8) +
+  geom_point(data = focus_bench, shape = 21, fill = "white", colour = "black", size = 1.8) +
+  facet_wrap(~ label, scales = "free_y", ncol = 3) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(title = "Population of the Kingston area, 2000-present",
+       x = NULL, y = "Residents",
+       caption = paste0("Sources: Census Bureau intercensal estimates 2000-2010 and 2010-2020; ",
+                        vintage_label, " estimates. Each panel has its own vertical scale.")) +
+  theme_kingston()
+```
+
+# Kingston in context
+
+Population indexed to July 2010 = 100, so places of very different size can be
+compared on one scale.
+
+```{r index-plot}
+index_geoids <- c(kingston_geoid, county_geoids, state_fips)
+
+idx <- annual %>%
+  filter(geoid %in% index_geoids, year >= 2010) %>%
+  group_by(geoid) %>%
+  mutate(index = 100 * population / first_or_na(population[year == 2010])) %>%
+  ungroup() %>%
+  left_join(geo_labels, by = "geoid") %>%
+  mutate(is_kingston = geoid == kingston_geoid)
+
+idx_end <- idx %>% group_by(geoid) %>% filter(year == max(year)) %>% ungroup()
+
+index_colours <- setNames(
+  c(okabe_ito[["vermillion"]], okabe_ito[["blue"]], okabe_ito[["green"]],
+    okabe_ito[["purple"]], "grey40")[seq_along(index_geoids)],
+  geo_labels$label[match(index_geoids, geo_labels$geoid)]
+)
+
+ggplot(idx, aes(year, index, colour = label, group = label)) +
+  geom_hline(yintercept = 100, colour = "grey50", linewidth = 0.3) +
+  geom_vline(xintercept = 2020, colour = "grey50", linetype = 3) +
+  geom_line(aes(linewidth = is_kingston)) +
+  geom_point(data = idx_end, size = 1.8) +
+  ggrepel::geom_text_repel(data = idx_end, aes(label = label), hjust = 0,
+                           nudge_x = 0.4, direction = "y", size = 3.2,
+                           segment.colour = "grey60", min.segment.length = 0) +
+  scale_colour_manual(values = index_colours, guide = "none") +
+  scale_linewidth_manual(values = c(`TRUE` = 1.3, `FALSE` = 0.7), guide = "none") +
+  scale_x_continuous(breaks = seq(2010, pep_vintage, 5),
+                     expand = expansion(mult = c(0.02, 0.25))) +
+  labs(title = "Population growth since 2010",
+       x = NULL, y = "Index (July 2010 = 100)",
+       caption = paste0("Sources: Census Bureau intercensal estimates 2010-2020; ",
+                        vintage_label, " estimates.")) +
+  theme_kingston()
+```
+
+# Growth before and after 2020
+
+Average annual growth, compounded, over two periods: the decade between the
+2010 and 2020 censuses, and the years since. Each period is measured within a
+single Census series, so the change of series in 2020 does not distort it.
+
+```{r growth-table}
+growth_rows <- growth %>%
+  filter(geoid %in% c(focus$geoid, county_geoids, state_fips)) %>%
+  left_join(geo_labels, by = "geoid") %>%
+  mutate(order = case_when(
+    sumlev == "061" ~ match(label, focus_order),
+    sumlev == "050" ~ 100L + match(geoid, county_geoids),
+    TRUE            ~ 200L
+  )) %>%
+  arrange(order)
+
+growth_rows %>%
+  transmute(
+    Place = label,
+    `April 2010` = fmt_count(pop_2010),
+    `April 2020 (census)` = fmt_count(census_2020),
+    !!paste("July", pep_vintage, "estimate") := fmt_count(pop_latest),
+    `Annual growth 2010-2020` = fmt_rate(cagr_2010_2020),
+    !!paste0("Annual growth 2020-", pep_vintage) := fmt_rate(cagr_2020_latest)
+  ) %>%
+  knitr::kable(align = "lrrrrr")
+```
+
+```{r growth-map, eval = !is.null(shapes), fig.height = 7}
+growth_long <- growth %>%
+  select(geoid, cagr_2010_2020, cagr_2020_latest) %>%
+  pivot_longer(-geoid, names_to = "period", values_to = "cagr") %>%
+  mutate(period = factor(
+    if_else(period == "cagr_2010_2020", "April 2010 to April 2020",
+            paste("April 2020 to July", pep_vintage)),
+    levels = c("April 2010 to April 2020", paste("April 2020 to July", pep_vintage))
+  ))
+
+growth_map <- shapes$cousub %>% inner_join(growth_long, by = c("GEOID" = "geoid"))
+
+# Cap the colour scale so one tiny town with an extreme rate does not wash
+# out the rest of the map; capped values show in the darkest colour.
+lim <- quantile(abs(growth_map$cagr), 0.98, na.rm = TRUE)
+
+ggplot(growth_map) +
+  geom_sf(aes(fill = cagr), colour = "white", linewidth = 0.2) +
+  geom_sf(data = shapes$counties, fill = NA, colour = "grey25", linewidth = 0.5) +
+  geom_sf(data = filter(growth_map, GEOID == kingston_geoid),
+          fill = NA, colour = "black", linewidth = 0.9) +
+  facet_wrap(~ period) +
+  scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(-lim, lim),
+                       oob = scales::squish, name = "Average annual change (%)") +
+  labs(title = "Where the area grew and shrank",
+       caption = paste0("City of Kingston outlined in black. Red = decline, blue = growth. ",
+                        "Sources: Census Bureau intercensal estimates; ", vintage_label, " estimates.")) +
+  theme_kingston_map() +
+  theme(legend.key.width = unit(1.5, "cm"))
+```
+
+# What is driving change in `r home_county` County
+
+The Census Bureau splits each county's population change into natural change
+(births minus deaths), net domestic migration (moves to and from other U.S.
+counties, including New York City), and net international migration. These
+figures exist for counties only, not for cities and towns.
+
+```{r components-home}
+home_comp <- comp %>% filter(geoid == home_geoid)
+
+home_bars <- home_comp %>%
+  select(year, NATURALCHG, DOMESTICMIG, INTERNATIONALMIG) %>%
+  pivot_longer(-year, names_to = "component", values_to = "value") %>%
+  mutate(component = factor(component,
+    levels = c("NATURALCHG", "DOMESTICMIG", "INTERNATIONALMIG"),
+    labels = c("Natural change (births minus deaths)", "Net domestic migration",
+               "Net international migration")))
+
+year_levels <- as.character(sort(unique(home_comp$year)))
+series_break <- match("2020", year_levels) + 0.5
+
+ggplot(home_bars, aes(factor(year, levels = year_levels), value, fill = component)) +
+  geom_col(width = 0.75) +
+  geom_point(data = home_comp,
+             aes(factor(year, levels = year_levels), NPOPCHG),
+             inherit.aes = FALSE, shape = 23, fill = "white", size = 2.5) +
+  geom_hline(yintercept = 0, colour = "grey30") +
+  geom_vline(xintercept = series_break, linetype = 2, colour = "grey40") +
+  scale_fill_manual(values = unname(okabe_ito[c("vermillion", "blue", "green")]), name = NULL) +
+  scale_y_continuous(labels = label_comma()) +
+  guides(fill = guide_legend(nrow = 2)) +
+  labs(title = paste0(home_county, " County: sources of population change"),
+       subtitle = "Diamonds show the total change, which also includes a residual the Census Bureau cannot assign to a component",
+       x = "Twelve months ending June 30", y = "People",
+       caption = paste0("Sources: Census Bureau Vintage 2020 estimates (to the dashed line) and ",
+                        vintage_label, " estimates (after it). The two series are not reconciled.")) +
+  theme_kingston()
+```
+
+```{r components-compare, fig.height = 5}
+post_label <- paste0("2021-", pep_vintage)
+
+rates <- comp %>%
+  filter(geoid %in% c(paste0(state_fips, comparison_counties), state_fips)) %>%
+  mutate(period = case_when(year <= 2019 ~ "2011-2019",
+                            year >= 2021 ~ post_label)) %>%
+  filter(!is.na(period)) %>%
+  group_by(geoid, name, period) %>%
+  summarise(
+    `Net domestic migration`      = 1000 * sum(DOMESTICMIG) / sum(POPESTIMATE),
+    `Net international migration` = 1000 * sum(INTERNATIONALMIG) / sum(POPESTIMATE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(starts_with("Net"), names_to = "component", values_to = "rate")
+
+name_order <- rates %>%
+  filter(period == post_label, component == "Net domestic migration") %>%
+  arrange(rate) %>% pull(name)
+
+rates <- rates %>% mutate(name = factor(name, levels = name_order))
+
+ggplot(rates, aes(rate, name)) +
+  geom_vline(xintercept = 0, colour = "grey50") +
+  geom_line(aes(group = name), colour = "grey60") +
+  geom_point(aes(colour = period), size = 2.8) +
+  facet_wrap(~ component) +
+  scale_colour_manual(values = setNames(c("grey45", okabe_ito[["vermillion"]]),
+                                        c("2011-2019", post_label)),
+                      name = NULL) +
+  labs(title = "Migration rates before and after 2020",
+       x = "Average per year, per 1,000 residents", y = NULL,
+       caption = "Sources: Census Bureau Vintage 2020 and current-vintage county estimates.") +
+  theme_kingston()
+```
+
+# Housing and population
+
+```{r no-decennial, eval = is.null(dec), results = "asis"}
+cat("*Decennial census data could not be retrieved, so this section is empty.",
+    "Check the Census API key and knit again with `refresh_data: true`.*")
+```
+
+```{r housing-scatter, eval = !is.null(dec), fig.height = 6.5}
+dec_years <- sort(unique(dec$year))
+y0 <- min(dec_years); y1 <- max(dec_years)
+
+dec_change <- dec %>%
+  filter(year %in% c(y0, y1)) %>%
+  select(geoid, year, population, housing_units) %>%
+  pivot_wider(names_from = year, values_from = c(population, housing_units)) %>%
+  mutate(
+    pop_change = 100 * (.data[[paste0("population_", y1)]] /
+                          .data[[paste0("population_", y0)]] - 1),
+    hu_change  = 100 * (.data[[paste0("housing_units_", y1)]] /
+                          .data[[paste0("housing_units_", y0)]] - 1)
+  ) %>%
+  inner_join(select(places, geoid, label, focus), by = "geoid") %>%
+  arrange(focus)   # draw the Kingston-area points last, on top
+
+ggplot(dec_change, aes(pop_change, hu_change)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey50", linetype = 2) +
+  geom_hline(yintercept = 0, colour = "grey70") +
+  geom_vline(xintercept = 0, colour = "grey70") +
+  geom_point(aes(colour = focus), size = 2.2, alpha = 0.85) +
+  ggrepel::geom_text_repel(data = filter(dec_change, focus), aes(label = label),
+                           size = 3.2, min.segment.length = 0) +
+  scale_colour_manual(values = c(`TRUE` = okabe_ito[["vermillion"]], `FALSE` = "grey55"),
+                      labels = c(`TRUE` = "Kingston area", `FALSE` = "Other cities and towns"),
+                      name = NULL) +
+  labs(title = paste0("Housing units and residents, ", y0, "-", y1),
+       subtitle = "Above the dashed line, housing grew faster than population",
+       x = "Change in population (%)", y = "Change in housing units (%)",
+       caption = "Source: decennial census counts for cities and towns in the study counties.") +
+  theme_kingston()
+```
+
+```{r persons-per-unit, eval = !is.null(dec)}
+dec %>%
+  inner_join(select(focus, geoid, label), by = "geoid") %>%
+  mutate(label = factor(label, levels = focus_order)) %>%
+  select(label, year, persons_per_occupied) %>%
+  pivot_wider(names_from = year, values_from = persons_per_occupied) %>%
+  arrange(label) %>%
+  mutate(across(-label, ~ sprintf("%.2f", .x))) %>%
+  rename(Place = label) %>%
+  knitr::kable(align = "lrrr",
+               caption = "Residents per occupied housing unit, decennial census. (Includes people in group quarters, so it runs slightly above average household size.)")
+```
+
+# Who lives here
+
+These figures come from the American Community Survey, which samples a small
+share of households each year and pools five years of responses for places
+this size. Every estimate carries a margin of error; the bars below show 90%
+intervals. The periods compared do not overlap, as the Census Bureau advises.
+
+```{r no-acs, eval = is.null(acs), results = "asis"}
+cat("*ACS data could not be retrieved, so this section is empty.",
+    "Check the Census API key and knit again with `refresh_data: true`.*")
+```
+
+```{r acs-setup, eval = !is.null(acs)}
+acs_focus <- acs %>%
+  inner_join(select(focus, geoid, label), by = "geoid") %>%
+  mutate(label = factor(label, levels = rev(focus_order)),
+         period = factor(period, levels = period_label(acs_years)))
+
+period_colours <- setNames(
+  c("grey65", okabe_ito[["skyblue"]], okabe_ito[["blue"]])[seq_along(acs_years)],
+  period_label(acs_years)
+)
+```
+
+## Age
+
+```{r acs-age, eval = !is.null(acs), fig.height = 7}
+acs_focus %>%
+  filter(str_starts(indicator, "Age: ")) %>%
+  mutate(age_group = factor(str_remove(indicator, "Age: "), levels = rev(age_groups)),
+         label = factor(label, levels = focus_order)) %>%
+  ggplot(aes(period, estimate, fill = age_group)) +
+  geom_col(width = 0.75) +
+  facet_wrap(~ label, ncol = 5) +
+  scale_y_continuous(labels = label_percent()) +
+  scale_fill_manual(values = unname(okabe_ito[c("purple", "blue", "skyblue", "orange")]),
+                    breaks = age_groups, name = NULL) +
+  labs(title = "Age structure",
+       x = NULL, y = "Share of residents",
+       caption = "Source: ACS 5-year estimates, table B01001.") +
+  theme_kingston() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Where newcomers came from
+
+Share of residents who lived somewhere else one year earlier. Moves from New
+York City count as moves from another New York county.
+
+```{r acs-mobility, eval = !is.null(acs), fig.height = 6}
+acs_focus %>%
+  filter(indicator %in% c("Moved from another NY county", "Moved from another state")) %>%
+  ggplot(aes(estimate, label, colour = period)) +
+  geom_pointrange(aes(xmin = pmax(estimate - moe, 0), xmax = estimate + moe),
+                  position = position_dodge(width = 0.6), size = 0.3) +
+  facet_wrap(~ indicator) +
+  scale_x_continuous(labels = label_percent()) +
+  scale_colour_manual(values = period_colours, name = NULL) +
+  labs(title = "Recent arrivals",
+       x = "Share of residents age 1 and over (90% interval)", y = NULL,
+       caption = "Source: ACS 5-year estimates, table B07003.") +
+  theme_kingston()
+```
+
+## Seasonal homes
+
+```{r acs-seasonal, eval = !is.null(acs), fig.height = 5}
+acs_focus %>%
+  filter(indicator == "Seasonal homes (share of housing units)") %>%
+  ggplot(aes(estimate, label, colour = period)) +
+  geom_pointrange(aes(xmin = pmax(estimate - moe, 0), xmax = estimate + moe),
+                  position = position_dodge(width = 0.6), size = 0.3) +
+  scale_x_continuous(labels = label_percent()) +
+  scale_colour_manual(values = period_colours, name = NULL) +
+  labs(title = "Homes held for seasonal, recreational or occasional use",
+       x = "Share of all housing units (90% interval)", y = NULL,
+       caption = "Source: ACS 5-year estimates, tables B25001 and B25004.") +
+  theme_kingston()
+```
+
+## Income, rents and home values
+
+Change between the two most recent non-overlapping periods. Dollar figures are
+in each period's own (nominal) dollars, so part of every increase is
+inflation. An asterisk marks a change that is statistically significant at the
+90% level.
+
+```{r acs-change-tables, eval = !is.null(acs), results = "asis"}
+from_year <- acs_years[length(acs_years) - 1]
+to_year   <- acs_years[length(acs_years)]
+
+change_indicators <- c("Median household income", "Median gross rent",
+                       "Median home value", "Median age")
+
+for (ind in change_indicators) {
+  fmt <- if (ind == "Median age") function(x) sprintf("%.1f", x) else fmt_money
+  # "estimate +/- margin", or a dash where the Census Bureau suppressed the figure
+  with_moe <- function(est, moe) {
+    if_else(is.na(est), "-", paste0(fmt(est), " &plusmn; ", fmt(moe)))
+  }
+
+  tbl <- acs_change(acs, ind, from_year, to_year) %>%
+    inner_join(select(focus, geoid, label), by = "geoid") %>%
+    mutate(label = factor(label, levels = focus_order)) %>%
+    arrange(label) %>%
+    transmute(
+      Place = label,
+      !!period_label(from_year) := with_moe(estimate_from, moe_from),
+      !!period_label(to_year)   := with_moe(estimate_to, moe_to),
+      Change = if_else(is.na(change), "-",
+                       paste0(fmt(change), if_else(coalesce(significant, FALSE), "*", "")))
+    )
+
+  print(knitr::kable(tbl, align = "lrrr", caption = ind))
+  cat("\n\n")
+}
+```
+
+# Notes on the data
+
+- **Annual estimates** come from the Census Bureau's Population Estimates
+  Program. For cities and towns these are modelled, mainly from changes in
+  housing units, not counted, and they carry no margin of error. Each new
+  vintage revises every year back to the last census. The 2000–2010 and
+  2010–2020 series are intercensal estimates, adjusted to agree with the
+  census at both ends of the decade; the years since 2020 are
+  `r vintage_label` estimates.
+- **Components of change** (births, deaths, migration) are produced only for
+  counties. Figures before July 2020 come from Vintage 2020, which was not
+  revised after the 2020 Census, so the two halves of that chart are not
+  perfectly consistent.
+- **Decennial census counts** for 2020 include noise added for privacy
+  (differential privacy). At the scale of a town the effect on total
+  population is small; housing unit totals were not altered.
+- **ACS figures** are survey estimates with margins of error at the 90% level.
+  Small towns can have wide intervals; a change is reported as significant only
+  when it exceeds the combined margin of error of the two periods.
+- **Data versions in this report:** `r vintage_label` population estimates;
+  ACS 5-year periods `r knitr::combine_words(period_label(acs_years))`;
+  boundaries from `r shapes_year`.
+
+# Sources
+
+U.S. Census Bureau, Population Estimates Program
+(<https://www.census.gov/programs-surveys/popest.html>); 2000, 2010 and 2020
+Decennial Census; American Community Survey 5-year estimates; TIGER/Line
+cartographic boundary files. Data retrieved with the tidycensus and tigris R
+packages.

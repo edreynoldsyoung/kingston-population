@@ -1,0 +1,11 @@
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Downloaded Census files and cached API results (re-created on first knit)
+data/
+
+# Knitted output
+*.html
+Kingston_Population_files/

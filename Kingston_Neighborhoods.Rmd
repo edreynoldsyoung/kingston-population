@@ -1,0 +1,376 @@
+---
+title: "Inside Kingston: Block Groups and Wards"
+author: "Ed Young"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    css: styles.css
+    toc: true
+    toc_float: true
+    df_print: kable
+  pdf_document:
+    toc: true
+    df_print: kable
+params:
+  refresh_data: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 6,
+  dpi = 150,
+  dev.args = list(bg = "linen")   # fill the margins left by fixed-shape maps
+)
+
+# In the PDF, scale every chart to the width of the text
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(out.width = "100%")
+}
+
+.old_plot_hook <- knitr::knit_hooks$get("plot")
+knitr::knit_hooks$set(plot = function(x, options) {
+  out <- .old_plot_hook(x, options)
+  if (knitr::is_html_output()) {
+    out <- paste0('<div class="plot-frame">\n', out, '\n</div>')
+  }
+  out
+})
+
+library(here)
+source(here("R", "load_packages.R"))
+source(here("R", "config.R"))
+source(here("R", "config_city.R"))
+source(here("R", "theme.R"))
+source(here("R", "get_data.R"))
+source(here("R", "get_data_city.R"))
+source(here("R", "process.R"))
+source(here("R", "process_city.R"))
+
+refresh <- isTRUE(params$refresh_data)
+```
+
+```{r load-data, include=FALSE}
+# Downloads happen only on the first knit or when refresh_data is true.
+city_geo     <- load_city_geo(refresh)
+block_counts <- load_block_counts(refresh)
+
+acs_bg_raw <- tryCatch(load_acs_bg(refresh), error = function(e) {
+  warning(conditionMessage(e), call. = FALSE); NULL })
+
+ward_error <- NULL
+districts <- tryCatch(load_districts(refresh), error = function(e) {
+  ward_error <<- conditionMessage(e); NULL })
+
+# ---- Block groups ----
+bg_shapes  <- build_bg_shapes(city_geo)
+bg_assign  <- assign_blocks(city_geo, bg_shapes, "bg", exact_2020_bg = TRUE)
+bg_totals  <- summarise_totals(block_counts, bg_assign)
+bg_compare <- compare_years(bg_totals) %>% mutate(label = bg_label(unit))
+bg_age     <- summarise_age(block_counts, bg_assign) %>% mutate(label = bg_label(unit))
+
+city_totals <- bg_totals %>%
+  group_by(year) %>%
+  summarise(across(c(population, housing_units), sum), .groups = "drop")
+city_pop <- function(y) city_totals$population[city_totals$year == y]
+city_hu  <- function(y) city_totals$housing_units[city_totals$year == y]
+
+bg_share <- bg_share_in_city(block_counts, city_geo)
+bg_acs_ids <- bg_share$bg[bg_share$share_in_city >= bg_min_share_in_city]
+
+bg_acs <- NULL
+move_label <- NULL
+if (!is.null(acs_bg_raw)) {
+  bg_acs <- build_bg_acs(acs_bg_raw) %>%
+    filter(geoid %in% bg_acs_ids) %>%
+    mutate(label = bg_label(geoid))
+  move_label <- recent_move_label(acs_bg_raw)
+}
+
+# Block groups ordered by 2020 population, largest first
+bg_order <- bg_compare %>% arrange(desc(population_2020)) %>% pull(label)
+
+# ---- Wards ----
+ward_result <- if (!is.null(districts)) {
+  build_wards(districts, city_geo$city)
+} else {
+  list(wards = NULL, message = paste("Ward boundaries could not be loaded:", ward_error))
+}
+wards <- ward_result$wards
+
+if (!is.null(wards)) {
+  ward_assign  <- assign_blocks(city_geo, wards, "ward")
+  ward_compare <- summarise_totals(block_counts, ward_assign) %>%
+    compare_years() %>%
+    mutate(label = paste("Ward", unit))
+  ward_age <- summarise_age(block_counts, ward_assign) %>%
+    mutate(label = paste("Ward", unit))
+  ward_coverage <- sum(ward_compare$population_2020) / city_pop(2020)
+}
+```
+
+# About this report
+
+This report looks inside the City of Kingston at two scales: Census block
+groups, the smallest areas for which the American Community Survey publishes
+data, and the city's wards. The 2020 Census counted
+`r fmt_count(city_pop(2020))` residents in the city, compared with
+`r fmt_count(city_pop(2010))` in 2010, and `r fmt_count(city_hu(2020))` housing
+units, compared with `r fmt_count(city_hu(2010))`.
+
+Both scales are built from census blocks, the smallest unit the Census Bureau
+counts. Blocks are added up into today's (2020) block groups and today's ward
+lines, so the 2010 and 2020 figures always describe the same territory even
+where boundaries have been redrawn since 2010.
+
+# Block groups
+
+The city contains `r nrow(bg_shapes)` block groups, or parts of them. Labels
+give the census tract and then the block-group number: **`r bg_order[1]`** is
+block group `r sub(".*-", "", bg_order[1])` of tract `r sub("-.*", "", bg_order[1])`.
+
+## Population change, 2010 to 2020
+
+```{r bg-change-map, fig.height = 7.5}
+bg_map_data <- bg_shapes %>% left_join(select(bg_compare, unit, pop_pct), by = c("bg" = "unit"))
+lim <- max(abs(bg_map_data$pop_pct), na.rm = TRUE)
+
+p <- ggplot(bg_map_data) +
+  geom_sf(aes(fill = pop_pct), colour = "white", linewidth = 0.3)
+if (!is.null(wards)) {
+  p <- p + geom_sf(data = wards, fill = NA, colour = "grey20", linewidth = 0.4, linetype = 2)
+}
+p +
+  geom_sf_text(aes(label = label), size = 2.6, fun.geometry = sf::st_point_on_surface) +
+  scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(-lim, lim),
+                       name = "Population change (%)") +
+  labs(title = "Population change by block group, 2010-2020",
+       caption = paste0("Red = decline, blue = growth.",
+                        if (!is.null(wards)) " Dashed lines are ward boundaries." else "",
+                        "\nSource: 2010 and 2020 Census block counts, summed to 2020 block groups.")) +
+  theme_kingston_map() +
+  theme(legend.key.width = unit(1.5, "cm"))
+```
+
+```{r bg-change-table}
+bg_compare %>%
+  mutate(label = factor(label, levels = bg_order)) %>%
+  arrange(label) %>%
+  transmute(
+    `Block group` = label,
+    `2010` = fmt_count(population_2010),
+    `2020` = fmt_count(population_2020),
+    Change = fmt_count(pop_change),
+    `Change (%)` = fmt_rate(pop_pct, 1),
+    `Housing units 2010` = fmt_count(housing_units_2010),
+    `Housing units 2020` = fmt_count(housing_units_2020),
+    `Housing change (%)` = fmt_rate(hu_pct, 1)
+  ) %>%
+  knitr::kable(align = "lrrrrrrr",
+               caption = "Residents and housing units by block group (parts inside the city)")
+```
+
+## Age, 2010 and 2020
+
+```{r bg-age, fig.height = 7}
+bg_age %>%
+  filter(age_group %in% c("Under 18", "65 and over")) %>%
+  mutate(label = factor(label, levels = rev(bg_order)),
+         year = factor(year)) %>%
+  ggplot(aes(share, label)) +
+  geom_line(aes(group = label), colour = "grey60") +
+  geom_point(aes(colour = year), size = 2.5) +
+  facet_wrap(~ age_group) +
+  scale_x_continuous(labels = label_percent()) +
+  scale_colour_manual(values = c("2010" = "grey55", "2020" = okabe_ito[["vermillion"]]),
+                      name = NULL) +
+  labs(title = "Children and older residents by block group",
+       x = "Share of residents", y = NULL,
+       caption = "Source: 2010 and 2020 Census block counts (sex by age), summed to 2020 block groups.") +
+  theme_kingston()
+```
+
+## Characteristics, `r period_label(bg_acs_year)`
+
+```{r no-acs, eval = is.null(bg_acs), results = "asis"}
+cat("*ACS block-group data could not be retrieved, so this section is empty.",
+    "Check the Census API key and knit again with `refresh_data: true`.*")
+```
+
+```{r acs-intro, eval = !is.null(bg_acs), results = "asis"}
+n_out <- nrow(bg_shapes) - length(unique(bg_acs$geoid))
+cat("These figures come from the American Community Survey (ACS), ", period_label(bg_acs_year),
+    ". Each block-group figure rests on a small sample of households pooled over five years, ",
+    "so margins of error are wide; the chart after the maps shows them. ",
+    "Grey areas on the maps have no estimate. ",
+    "\"Moved in recently\" means the householder moved into the home in the most recent ",
+    "category the Census Bureau reports (", tolower(move_label), ").",
+    if (n_out > 0) paste0(" ", n_out, " block group(s) lying mostly outside the city are left out, ",
+                          "because their ACS figures describe mostly non-city residents.") else "",
+    sep = "")
+```
+
+```{r acs-maps, eval = !is.null(bg_acs), fig.height = 9}
+map_indicators <- tibble::tribble(
+  ~indicator,                               ~short,
+  "Median household income",                "Median household income",
+  "Renter-occupied (share of households)",  "Households renting",
+  "Age: 65 and over",                       "Residents 65 and over",
+  "Householder moved in recently",          "Householder moved in recently"
+)
+
+bg_fill_map <- function(indicator, short) {
+  ind <- indicator
+  d <- bg_shapes %>%
+    left_join(filter(bg_acs, .data$indicator == ind) %>% select(geoid, estimate),
+              by = c("bg" = "geoid"))
+  is_money <- ind == "Median household income"
+  ggplot(d) +
+    geom_sf(aes(fill = estimate), colour = "white", linewidth = 0.3) +
+    geom_sf_text(aes(label = label), size = 2.2, fun.geometry = sf::st_point_on_surface) +
+    scale_fill_distiller(palette = "YlGnBu", direction = 1, na.value = "grey90",
+                         labels = if (is_money) label_dollar(scale = 0.001, suffix = "k")
+                                  else label_percent(accuracy = 1),
+                         name = NULL) +
+    labs(title = short) +
+    theme_kingston_map(base_size = 9) +
+    theme(legend.key.width = unit(1, "cm"),
+          plot.title = element_text(size = rel(1.1)))
+}
+
+maps <- purrr::pmap(map_indicators, bg_fill_map)
+
+# Four maps in a 2 x 2 grid without extra packages
+grid::grid.newpage()
+grid::pushViewport(grid::viewport(layout = grid::grid.layout(2, 2)))
+for (i in seq_along(maps)) {
+  print(maps[[i]], vp = grid::viewport(layout.pos.row = (i - 1) %/% 2 + 1,
+                                       layout.pos.col = (i - 1) %% 2 + 1))
+}
+```
+
+```{r acs-moe, eval = !is.null(bg_acs), fig.height = 8}
+bg_acs %>%
+  filter(indicator %in% map_indicators$indicator) %>%
+  left_join(map_indicators, by = "indicator") %>%
+  mutate(short = factor(short, levels = map_indicators$short),
+         label = factor(label, levels = rev(bg_order)),
+         reliability = if_else(!is.na(cv) & cv > 0.30, "Low (CV over 30%)", "Adequate")) %>%
+  filter(!is.na(estimate)) %>%
+  ggplot(aes(estimate, label)) +
+  geom_linerange(aes(xmin = pmax(estimate - moe, 0), xmax = estimate + moe),
+                 colour = "grey55") +
+  geom_point(aes(shape = reliability), size = 2.2, colour = okabe_ito[["blue"]], fill = "white") +
+  facet_wrap(~ short, scales = "free_x", ncol = 2) +
+  scale_shape_manual(values = c("Adequate" = 19, "Low (CV over 30%)" = 21), name = "Reliability") +
+  scale_x_continuous(labels = function(x) {
+    if (max(x, na.rm = TRUE) > 10) label_dollar()(x) else label_percent(accuracy = 1)(x)
+  }) +
+  labs(title = "The same figures with their margins of error",
+       subtitle = "Lines show 90% intervals. Open circles: coefficient of variation above 30%; treat with caution.",
+       x = NULL, y = NULL,
+       caption = paste0("Source: ACS 5-year estimates, ", period_label(bg_acs_year),
+                        ", tables B01001, B19013, B25003 and B25038.")) +
+  theme_kingston()
+```
+
+# Wards
+
+```{r ward-message, results = "asis"}
+cat("*", ward_result$message, "*", sep = "")
+if (!is.null(wards) && abs(ward_coverage - 1) > 0.01) {
+  cat(" *The wards account for ", fmt_share(ward_coverage),
+      " of the city's 2020 population; the rest falls in blocks the ward map ",
+      "does not cover.*", sep = "")
+}
+```
+
+```{r ward-intro, eval = !is.null(wards), results = "asis"}
+cat("Ward lines are redrawn after each census, so these are today's wards. ",
+    "The 2010 figures are the people who lived, in 2010, inside today's ward lines.",
+    sep = "")
+```
+
+```{r ward-map, eval = !is.null(wards), fig.height = 7.5}
+ward_map_data <- wards %>%
+  left_join(select(ward_compare, unit, population_2020, pop_pct), by = c("ward" = "unit")) %>%
+  mutate(map_label = paste0(label, "\n", fmt_count(population_2020), "\n", fmt_rate(pop_pct, 1)))
+wlim <- max(abs(ward_map_data$pop_pct), na.rm = TRUE)
+
+ggplot(ward_map_data) +
+  geom_sf(aes(fill = pop_pct), colour = "white", linewidth = 0.5) +
+  geom_sf_text(aes(label = map_label), size = 3, fun.geometry = sf::st_point_on_surface,
+               lineheight = 0.9) +
+  scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(-wlim, wlim),
+                       name = "Population change 2010-2020 (%)") +
+  labs(title = "Wards: 2020 population and change since 2010",
+       caption = "Source: 2010 and 2020 Census block counts, summed to current ward boundaries.") +
+  theme_kingston_map() +
+  theme(legend.key.width = unit(1.5, "cm"))
+```
+
+```{r ward-table, eval = !is.null(wards)}
+ward_compare %>%
+  arrange(unit) %>%
+  transmute(
+    Ward = label,
+    `2010` = fmt_count(population_2010),
+    `2020` = fmt_count(population_2020),
+    `Change (%)` = fmt_rate(pop_pct, 1),
+    `Share of city 2020` = fmt_share(share_of_city),
+    `Housing units 2010` = fmt_count(housing_units_2010),
+    `Housing units 2020` = fmt_count(housing_units_2020),
+    `Housing change (%)` = fmt_rate(hu_pct, 1)
+  ) %>%
+  knitr::kable(align = "lrrrrrrr", caption = "Residents and housing units by ward")
+```
+
+```{r ward-age, eval = !is.null(wards), fig.height = 5}
+ward_levels <- paste("Ward", sort(unique(ward_age$unit), decreasing = TRUE))
+
+ward_age %>%
+  filter(age_group %in% c("Under 18", "65 and over")) %>%
+  mutate(label = factor(label, levels = ward_levels), year = factor(year)) %>%
+  ggplot(aes(share, label)) +
+  geom_line(aes(group = label), colour = "grey60") +
+  geom_point(aes(colour = year), size = 2.8) +
+  facet_wrap(~ age_group) +
+  scale_x_continuous(labels = label_percent()) +
+  scale_colour_manual(values = c("2010" = "grey55", "2020" = okabe_ito[["vermillion"]]),
+                      name = NULL) +
+  labs(title = "Children and older residents by ward",
+       x = "Share of residents", y = NULL,
+       caption = "Source: 2010 and 2020 Census block counts (sex by age), summed to current wards.") +
+  theme_kingston()
+```
+
+# Notes on the data
+
+- **Census blocks** are the building blocks for both scales. Each 2020 block
+  belongs to exactly one 2020 block group. Each 2010 block is placed by a point
+  inside it. That is exact unless a 2010 block was later split by a new
+  boundary, which in a built-up city is uncommon.
+- **2020 counts** include noise added for privacy (differential privacy). It
+  is noticeable for a single block and shrinks as blocks are added together;
+  at the size of a block group or ward it is small. Housing-unit totals were
+  not altered.
+- **ACS figures** are survey estimates, shown with 90% margins of error. The
+  coefficient of variation (standard error divided by the estimate) above 30%
+  is a common threshold for "use with caution". Medians that the Census Bureau
+  suppressed appear blank on the maps.
+- **Ward boundaries** come from the Ulster County Board of Elections'
+  election-district file, merged into wards
+  (`r if (is.null(ward_file)) "downloaded automatically" else "from your own file"`).
+- **Data versions:** 2010 and 2020 Census; ACS 5-year `r period_label(bg_acs_year)`;
+  2020 TIGER/Line boundaries.
+
+# Sources
+
+U.S. Census Bureau: 2010 Census Summary File 1 and 2020 Census Demographic and
+Housing Characteristics File (block level); American Community Survey 5-year
+estimates; 2010 and 2020 TIGER/Line block and county subdivision boundaries.
+Ulster County Information Services: election district boundaries. Data
+retrieved with the tidycensus and tigris R packages.
